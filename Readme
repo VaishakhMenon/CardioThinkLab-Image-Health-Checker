@@ -1,0 +1,204 @@
+# CardioThinkLab Image Health Checker 🏥
+
+Automated image health monitoring tool with JavaScript rendering support for WordPress sites. Built with Streamlit and Playwright.
+
+## Features ✨
+
+- **JavaScript Rendering**: Uses Playwright to render pages like a real browser, catching lazy-loaded and dynamically loaded images
+- **Smart Pagination**: Automatically detects and follows WordPress pagination (numbered pages, "Load More" buttons, infinite scroll)
+- **Comprehensive Checking**: Checks all images including:
+  - Standard `<img>` tags
+  - CSS background images
+  - Lazy-loaded images
+  - External images (optional)
+- **Google Sheets Integration**: Exports results directly to Google Sheets
+- **Interactive Dashboard**: Filter, sort, and download results
+- **Real-time Progress**: Live progress tracking during crawls
+
+## Quick Start 🚀
+
+### 1. Deploy to Streamlit Cloud
+
+1. Fork or push this repository to your GitHub account
+2. Go to [share.streamlit.io](https://share.streamlit.io)
+3. Click "New app"
+4. Select your repository: `VaishakhMenon/CardioThinkLab-Image-Health-Checker`
+5. Set main file path: `app.py`
+6. Click "Deploy"
+
+### 2. Configure Google Sheets Integration
+
+#### A. Create a Service Account (One-time setup)
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select existing one
+3. Enable Google Sheets API and Google Drive API:
+   - Navigate to "APIs & Services" > "Library"
+   - Search for "Google Sheets API" and enable it
+   - Search for "Google Drive API" and enable it
+4. Create Service Account:
+   - Go to "APIs & Services" > "Credentials"
+   - Click "Create Credentials" > "Service Account"
+   - Give it a name (e.g., "streamlit-image-checker")
+   - Click "Create and Continue"
+   - Skip optional steps, click "Done"
+5. Generate Key:
+   - Click on the service account you just created
+   - Go to "Keys" tab
+   - Click "Add Key" > "Create new key"
+   - Choose "JSON" format
+   - Download the JSON file
+
+#### B. Share Your Google Sheet
+
+1. Open your Google Sheet: https://docs.google.com/spreadsheets/d/1k37PVPp_qKWPhn21AnstLj8GhkGng7ucf9zxMF_nOp0/edit
+2. Click "Share" button
+3. Add the service account email from the JSON file (looks like: `xxx@xxx.iam.gserviceaccount.com`)
+4. Give it "Editor" permissions
+
+#### C. Add Credentials to Streamlit Secrets
+
+1. In Streamlit Cloud, go to your app settings
+2. Click on "Secrets" in the left menu
+3. Paste your entire service account JSON file content in this format:
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\nYOUR-PRIVATE-KEY\n-----END PRIVATE KEY-----\n"
+client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "your-cert-url"
+```
+
+**Important**: Replace all values with actual values from your downloaded JSON file. Make sure to preserve the exact formatting, especially for `private_key` with `\n` for newlines.
+
+### 3. Run the App
+
+Once deployed and configured:
+
+1. Open your Streamlit app URL
+2. Configure crawl settings in the sidebar
+3. Click "🚀 Start Image Health Check"
+4. Wait for the scan to complete
+5. Review results in the interactive dashboard
+6. Export to CSV or Google Sheets
+
+## How It Works 🔧
+
+1. **Discovery Phase**: 
+   - Crawls the website starting from the homepage
+   - Identifies all article/blog pages
+   - Handles pagination automatically (numbered pages, load more buttons, infinite scroll)
+
+2. **Image Checking Phase**:
+   - Visits each discovered page
+   - Renders JavaScript (catches lazy-loaded images)
+   - Scrolls to load all images
+   - Extracts all image URLs (including CSS backgrounds)
+   - Checks HTTP status for each image
+   - Caches checks to avoid duplicate requests
+
+3. **Results**:
+   - Displays comprehensive dashboard with statistics
+   - Shows filterable table of all images
+   - Color-coded status (✅ OK, ❌ BROKEN, ⚠️ WARNING)
+   - Exports to CSV or Google Sheets
+
+## Status Codes 📊
+
+- **200** ✅ - Image loads successfully
+- **404** ❌ - Image not found
+- **403** ⚠️ - Access forbidden
+- **0** ❌ - Connection error (timeout, DNS failure, etc.)
+- **Other** ⚠️ - Various HTTP errors
+
+## Configuration Options ⚙️
+
+### Sidebar Settings:
+
+- **Website URL**: The main URL to crawl (default: cardiothinklab.com)
+- **Max Pages to Crawl**: Limit the number of pages to check (prevents long crawls)
+- **Check External Images**: Include images hosted on external domains
+- **Export to Google Sheets**: Auto-export results to connected Google Sheet
+
+## Troubleshooting 🔧
+
+### App won't deploy:
+- Make sure all files are in the repository root
+- Check `requirements.txt` is present
+- Verify Streamlit Cloud has access to your repository
+
+### Google Sheets export fails:
+- Verify service account email has Editor access to the sheet
+- Check that all credentials are correctly added to Streamlit Secrets
+- Ensure private_key maintains proper formatting with `\n` for newlines
+
+### No images found:
+- Check the URL is correct and accessible
+- Verify pagination detection is working (check console output)
+- Try increasing "Max Pages to Crawl"
+
+### Slow crawling:
+- Reduce "Max Pages to Crawl"
+- Disable "Check External Images" if not needed
+- This is normal for Playwright - it renders full JavaScript
+
+## Technical Stack 💻
+
+- **Streamlit**: Web interface and dashboard
+- **Playwright**: Browser automation for JavaScript rendering
+- **Pandas**: Data processing and export
+- **gspread**: Google Sheets integration
+- **Google Cloud**: Service account authentication
+
+## Local Development 🛠️
+
+To run locally for testing:
+
+```bash
+# Clone repository
+git clone https://github.com/VaishakhMenon/CardioThinkLab-Image-Health-Checker.git
+cd CardioThinkLab-Image-Health-Checker
+
+# Install dependencies
+pip install -r requirements.txt
+playwright install chromium
+
+# Create .streamlit/secrets.toml with your credentials
+mkdir -p .streamlit
+nano .streamlit/secrets.toml
+# Add your service account credentials
+
+# Run the app
+streamlit run app.py
+```
+
+## Future Enhancements 🚀
+
+Potential features to add:
+- Scheduled automated scans
+- Email/Slack notifications for broken images
+- Historical tracking of image health
+- Pre-deployment staging environment checks
+- Image size/performance analysis
+- Broken link detection (not just images)
+
+## Support 💬
+
+For issues or questions:
+- Open an issue on GitHub
+- Contact the CardioThinkLab development team
+
+## License 📄
+
+MIT License - Feel free to modify and use for your own projects.
+
+---
+
+**Built with ❤️ for CardioThinkLab**
