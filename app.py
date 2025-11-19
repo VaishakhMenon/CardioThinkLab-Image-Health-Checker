@@ -16,9 +16,9 @@ import os
 def install_playwright():
     """Install Playwright browsers if not already installed"""
     try:
-        # Install chromium browser
+        # Install chromium browser only (deps handled by packages.txt)
         result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
+            [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -26,24 +26,22 @@ def install_playwright():
         )
         
         if result.returncode != 0:
-            st.warning(f"Browser installation warning: {result.stderr}")
+            # Try without --with-deps if it fails
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False
+            )
         
-        # Install system dependencies
-        deps_result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False
-        )
+        return result.returncode == 0
         
-        return True
     except subprocess.TimeoutExpired:
-        st.error("⏱️ Playwright installation timed out. Please refresh the page and try again.")
+        st.error("⏱️ Playwright installation timed out. Please refresh the page.")
         return False
     except Exception as e:
         st.error(f"❌ Failed to install Playwright: {str(e)}")
-        st.info("💡 Try refreshing the page. If the issue persists, check the Streamlit Cloud logs.")
         return False
 
 # Install Playwright on startup
@@ -179,18 +177,27 @@ def extract_images_from_page(page):
     # Wait for page to be fully loaded
     page.wait_for_load_state('networkidle', timeout=30000)
     
-    # Scroll to load lazy images
+    # Scroll to bottom multiple times to trigger ALL lazy loading
     page.evaluate("""
         async () => {
             await new Promise((resolve) => {
                 let totalHeight = 0;
-                let distance = 100;
+                let distance = 300;
+                let scrollCount = 0;
                 let timer = setInterval(() => {
                     let scrollHeight = document.body.scrollHeight;
                     window.scrollBy(0, distance);
                     totalHeight += distance;
-                    if(totalHeight >= scrollHeight){
+                    scrollCount++;
+                    
+                    // Scroll back up partway to trigger any viewport-based lazy loading
+                    if (scrollCount % 5 === 0) {
+                        window.scrollBy(0, -1000);
+                    }
+                    
+                    if(totalHeight >= scrollHeight * 1.5){  // Go beyond to ensure everything loads
                         clearInterval(timer);
+                        window.scrollTo(0, 0);  // Scroll back to top
                         resolve();
                     }
                 }, 100);
@@ -198,15 +205,49 @@ def extract_images_from_page(page):
         }
     """)
     
-    # Wait a bit more for lazy images to load
-    time.sleep(2)
+    # Wait for lazy images to load
+    page.wait_for_timeout(4000)
     
-    # Extract all image sources
-    img_elements = page.query_selector_all('img')
-    for img in img_elements:
-        src = img.get_attribute('src')
-        if src:
-            images.append(src)
+    # Scroll one more time slowly
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    page.wait_for_timeout(2000)
+    
+    # Extract ALL image sources including lazy-loaded ones
+    img_data = page.evaluate("""
+        () => {
+            const images = [];
+            
+            // Get all img elements
+            document.querySelectorAll('img').forEach(img => {
+                // Check various attributes where image URLs might be
+                const src = img.src || img.getAttribute('src') || 
+                           img.getAttribute('data-src') || 
+                           img.getAttribute('data-lazy-src') ||
+                           img.getAttribute('data-original') ||
+                           img.getAttribute('data-srcset');
+                           
+                if (src && src.startsWith('http')) {
+                    images.push(src);
+                }
+                
+                // Also check srcset
+                const srcset = img.srcset || img.getAttribute('srcset');
+                if (srcset) {
+                    srcset.split(',').forEach(s => {
+                        const url = s.trim().split(' ')[0];
+                        if (url && url.startsWith('http')) {
+                            images.push(url);
+                        }
+                    });
+                }
+            });
+            
+            return images;
+        }
+    """)
+    
+    if img_data:
+        images.extend(img_data)
     
     # Also check for background images in CSS
     bg_images = page.evaluate("""
@@ -221,7 +262,9 @@ def extract_images_from_page(page):
                     if (matches) {
                         matches.forEach(match => {
                             const url = match.replace(/url\\(["\']?([^"\'\\)]+)["\']?\\)/, '$1');
-                            images.push(url);
+                            if (url.startsWith('http')) {
+                                images.push(url);
+                            }
                         });
                     }
                 }
@@ -233,98 +276,163 @@ def extract_images_from_page(page):
     if bg_images:
         images.extend(bg_images)
     
-    return list(set(images))  # Remove duplicates
+    # Remove duplicates and data URLs
+    unique_images = list(set([img for img in images if img.startswith('http')]))
+    
+    return unique_images
 
 
 def get_all_article_links(page, base_url, max_pages):
     """Get all article links handling pagination"""
     article_links = set()
-    visited_pages = set()
     
     progress_placeholder = st.empty()
+    base_domain = urlparse(base_url).netloc
     
-    def crawl_page(url, depth=0):
-        if depth > 10 or url in visited_pages or len(article_links) >= max_pages:
-            return
+    try:
+        # Navigate to homepage
+        page.goto(base_url, wait_until='networkidle', timeout=30000)
+        progress_placeholder.info(f"🔍 Starting discovery from homepage...")
         
-        visited_pages.add(url)
-        progress_placeholder.info(f"🔍 Discovering articles... Found {len(article_links)} so far (Page {len(visited_pages)})")
+        # Click "Load More" button multiple times to load all articles
+        load_more_clicks = 0
+        max_load_more_clicks = 20  # Prevent infinite loop
         
-        try:
-            page.goto(url, wait_until='networkidle', timeout=30000)
-            
-            # Scroll to load any lazy-loaded content
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(1)
-            
-            # Get all article links
-            links = page.evaluate("""
-                () => {
-                    const links = [];
-                    document.querySelectorAll('a').forEach(a => {
+        while load_more_clicks < max_load_more_clicks:
+            try:
+                # Scroll to bottom to trigger lazy loading
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(2)
+                
+                # Look for "Load More" button with various selectors
+                load_more_button = page.query_selector('button:has-text("Load more"), a:has-text("Load more"), .load-more, button.loadmore, a.loadmore, [aria-label*="Load more"]')
+                
+                if load_more_button and load_more_button.is_visible():
+                    progress_placeholder.info(f"🔄 Loading more articles... (clicked {load_more_clicks + 1} times)")
+                    load_more_button.click()
+                    page.wait_for_timeout(3000)  # Wait for content to load
+                    load_more_clicks += 1
+                else:
+                    break  # No more "Load More" button
+            except Exception as e:
+                break  # Can't find or click button anymore
+        
+        progress_placeholder.info(f"✅ Loaded all articles (clicked Load More {load_more_clicks} times)")
+        
+        # Scroll through entire page to ensure all lazy images load
+        page.evaluate("""
+            async () => {
+                await new Promise((resolve) => {
+                    let totalHeight = 0;
+                    let distance = 200;
+                    let timer = setInterval(() => {
+                        let scrollHeight = document.body.scrollHeight;
+                        window.scrollBy(0, distance);
+                        totalHeight += distance;
+                        if(totalHeight >= scrollHeight){
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            }
+        """)
+        page.wait_for_timeout(3000)
+        
+        # Now extract ALL article links from the page
+        article_links_found = page.evaluate("""
+            () => {
+                const links = new Set();
+                
+                // Find all article links - look for common WordPress article selectors
+                const selectors = [
+                    'article a[href]',
+                    '.article a[href]',
+                    '.post a[href]',
+                    '.entry a[href]',
+                    'h2 a[href]',
+                    'h3 a[href]',
+                    '.article-title a[href]',
+                    '.entry-title a[href]',
+                    '.post-title a[href]',
+                    '[class*="article"] a[href]',
+                    '[class*="post"] a[href]'
+                ];
+                
+                selectors.forEach(selector => {
+                    document.querySelectorAll(selector).forEach(a => {
                         const href = a.href;
-                        if (href && !href.includes('#') && !href.includes('javascript:')) {
-                            links.push(href);
+                        // Only get links that look like content pages
+                        if (href && 
+                            !href.includes('#') && 
+                            !href.includes('javascript:') &&
+                            !href.includes('/category/') &&
+                            !href.includes('/tag/') &&
+                            !href.includes('/author/') &&
+                            href.length > 10) {
+                            links.add(href);
                         }
                     });
-                    return links;
-                }
-            """)
-            
-            base_domain = urlparse(base_url).netloc
-            
-            for link in links:
-                # Filter for internal links that look like articles
-                if is_internal_url(link, base_domain):
-                    # Add logic to identify article URLs (customize based on your site structure)
-                    parsed = urlparse(link)
-                    if any(keyword in parsed.path.lower() for keyword in ['article', 'post', '2024', '2025', 'blog']):
-                        article_links.add(link)
-            
-            # Look for pagination - numbered pages
-            pagination_links = page.evaluate("""
-                () => {
-                    const links = [];
-                    document.querySelectorAll('a.page-numbers, .pagination a, a[rel="next"]').forEach(a => {
-                        links.push(a.href);
-                    });
-                    return links;
-                }
-            """)
-            
-            # Follow pagination
-            for pag_link in pagination_links:
-                if pag_link and pag_link not in visited_pages and is_internal_url(pag_link, base_domain):
-                    crawl_page(pag_link, depth + 1)
-            
-            # Check for "Load More" button
-            try:
-                load_more = page.query_selector('button.load-more, a.load-more, .loadmore')
-                if load_more:
-                    load_more.click()
-                    time.sleep(2)
-                    crawl_page(url, depth)  # Re-crawl to get new links
-            except:
-                pass
+                });
                 
-        except Exception as e:
-            st.warning(f"Error crawling {url}: {str(e)}")
-    
-    # Start crawling from base URL
-    crawl_page(base_url)
-    
-    progress_placeholder.success(f"✅ Discovery complete! Found {len(article_links)} article pages")
-    
-    return list(article_links)
+                return Array.from(links);
+            }
+        """)
+        
+        # Filter for internal links only
+        for link in article_links_found:
+            if is_internal_url(link, base_domain):
+                article_links.add(link)
+        
+        # Also add the homepage itself
+        article_links.add(base_url)
+        
+        progress_placeholder.success(f"✅ Discovery complete! Found {len(article_links)} pages to check")
+        
+        if len(article_links) <= 1:
+            progress_placeholder.warning(f"⚠️ Only found homepage. This might indicate an issue with article detection. Will check homepage thoroughly.")
+        
+        return list(article_links)[:max_pages]
+        
+    except Exception as e:
+        progress_placeholder.error(f"❌ Error during discovery: {str(e)}")
+        return [base_url]  # At minimum, return homepage
 
 
 def check_image_status(page, image_url):
-    """Check HTTP status of an image"""
+    """Check HTTP status of an image with better error handling"""
     try:
-        response = page.request.get(image_url, timeout=10000)
-        return response.status
+        # Validate URL first
+        if not image_url or not image_url.startswith('http'):
+            return 0  # Invalid URL
+        
+        # Check with shorter timeout to speed things up
+        response = page.request.get(image_url, timeout=15000)
+        status = response.status
+        
+        # Additional check: if it's 200 but content-type is not an image, mark as suspicious
+        if status == 200:
+            content_type = response.headers.get('content-type', '').lower()
+            if content_type and 'image' not in content_type and 'octet-stream' not in content_type:
+                # It's returning HTML or something else, not an image
+                return 404  # Treat as not found
+        
+        return status
+        
     except Exception as e:
-        return 0  # Connection error
+        error_str = str(e).lower()
+        
+        # Categorize errors
+        if 'timeout' in error_str or 'timed out' in error_str:
+            return 0  # Timeout
+        elif '404' in error_str:
+            return 404
+        elif '403' in error_str:
+            return 403
+        elif '500' in error_str or '502' in error_str or '503' in error_str:
+            return 500
+        else:
+            return 0  # Generic connection error
 
 
 def crawl_and_check_images(base_url, max_pages, include_external):
@@ -363,11 +471,16 @@ def crawl_and_check_images(base_url, max_pages, include_external):
             for idx, page_url in enumerate(article_links[:max_pages]):
                 progress = (idx + 1) / total_pages
                 progress_bar.progress(progress)
-                status_text.info(f"📄 Checking page {idx + 1}/{total_pages}: {page_url}")
+                
+                # Extract page title for better progress display
+                page_title = page_url.split('/')[-2] if page_url.endswith('/') else page_url.split('/')[-1]
+                status_text.info(f"📄 Checking page {idx + 1}/{total_pages}: {page_title}")
                 
                 try:
                     page.goto(page_url, wait_until='networkidle', timeout=30000)
                     images = extract_images_from_page(page)
+                    
+                    status_text.info(f"🖼️ Found {len(images)} images on this page, checking status...")
                     
                     for img_url in images:
                         # Convert relative URLs to absolute
@@ -478,6 +591,20 @@ if st.button("🚀 Start Image Health Check", type="primary", disabled=not playw
                 use_container_width=True,
                 height=400
             )
+            
+            # Show broken images separately for easy reference
+            if broken_images > 0:
+                st.markdown("---")
+                st.subheader("❌ Broken Images Details")
+                broken_df = df[df['Status Code'] != 200]
+                
+                for idx, row in broken_df.iterrows():
+                    with st.expander(f"❌ {row['Status']} - {row['Image URL'][:80]}..."):
+                        st.write("**Page:**", row['Page URL'])
+                        st.write("**Image URL:**", row['Image URL'])
+                        st.write("**Status Code:**", row['Status Code'])
+                        st.write("**Status:**", row['Status'])
+                        st.code(row['Image URL'], language=None)
             
             # Export options
             st.markdown("---")
