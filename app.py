@@ -16,30 +16,46 @@ import os
 def install_playwright():
     """Install Playwright browsers if not already installed"""
     try:
-        # Check if browsers are installed by attempting to get browser path
+        # Install chromium browser
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True,
             text=True,
-            timeout=300  # 5 minutes max
+            timeout=300,
+            check=False
         )
         
-        # Also install system dependencies
-        subprocess.run(
+        if result.returncode != 0:
+            st.warning(f"Browser installation warning: {result.stderr}")
+        
+        # Install system dependencies
+        deps_result = subprocess.run(
             [sys.executable, "-m", "playwright", "install-deps", "chromium"],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
+            check=False
         )
         
         return True
+    except subprocess.TimeoutExpired:
+        st.error("⏱️ Playwright installation timed out. Please refresh the page and try again.")
+        return False
     except Exception as e:
-        st.error(f"Failed to install Playwright: {str(e)}")
+        st.error(f"❌ Failed to install Playwright: {str(e)}")
+        st.info("💡 Try refreshing the page. If the issue persists, check the Streamlit Cloud logs.")
         return False
 
 # Install Playwright on startup
-with st.spinner("🔧 Setting up browser environment (first run only)..."):
-    install_playwright()
+installation_status = st.empty()
+with installation_status:
+    with st.spinner("🔧 Setting up browser environment (first run may take 2-3 minutes)..."):
+        playwright_ready = install_playwright()
+
+if playwright_ready:
+    installation_status.success("✅ Browser environment ready!")
+    time.sleep(1)
+    installation_status.empty()
 
 # Page config
 st.set_page_config(
@@ -399,7 +415,11 @@ def crawl_and_check_images(base_url, max_pages, include_external):
 
 
 # Main execution
-if st.button("🚀 Start Image Health Check", type="primary"):
+if st.button("🚀 Start Image Health Check", type="primary", disabled=not playwright_ready):
+    if not playwright_ready:
+        st.error("❌ Browser environment not ready. Please refresh the page.")
+        st.stop()
+    
     if not base_url:
         st.error("Please enter a website URL")
     else:
