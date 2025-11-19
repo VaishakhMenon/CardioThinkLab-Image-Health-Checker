@@ -7,6 +7,39 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 import json
+import subprocess
+import sys
+import os
+
+# Install Playwright browsers on first run (for Streamlit Cloud)
+@st.cache_resource
+def install_playwright():
+    """Install Playwright browsers if not already installed"""
+    try:
+        # Check if browsers are installed by attempting to get browser path
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutes max
+        )
+        
+        # Also install system dependencies
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        
+        return True
+    except Exception as e:
+        st.error(f"Failed to install Playwright: {str(e)}")
+        return False
+
+# Install Playwright on startup
+with st.spinner("🔧 Setting up browser environment (first run only)..."):
+    install_playwright()
 
 # Page config
 st.set_page_config(
