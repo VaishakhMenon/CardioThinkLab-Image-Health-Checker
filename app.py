@@ -1,15 +1,13 @@
 import streamlit as st
-import pandas as pd
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from urllib.parse import urljoin, urlparse
 import time
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
-import json
 import subprocess
 import sys
 import os
+import csv
+import io
 
 # Install Playwright browsers on first run (for Streamlit Cloud)
 @st.cache_resource
@@ -91,9 +89,9 @@ with st.sidebar:
     )
     
     export_to_sheets = st.checkbox(
-        "Export to Google Sheets",
+        "Export to CSV",
         value=True,
-        help="Automatically export results to Google Sheets"
+        help="Automatically download results as CSV"
     )
     
     st.markdown("---")
@@ -101,67 +99,14 @@ with st.sidebar:
     st.markdown("This tool uses Playwright to render JavaScript and detect all images including lazy-loaded ones.")
 
 
-def get_google_sheets_client():
-    """Initialize Google Sheets client using service account credentials from Streamlit secrets"""
-    try:
-        # Get credentials from Streamlit secrets
-        credentials_dict = dict(st.secrets["gcp_service_account"])
-        
-        scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
-        
-        credentials = Credentials.from_service_account_info(
-            credentials_dict,
-            scopes=scopes
-        )
-        
-        client = gspread.authorize(credentials)
-        return client
-    except Exception as e:
-        st.error(f"Failed to connect to Google Sheets: {str(e)}")
-        return None
-
-
-def export_to_google_sheets(df, sheet_url):
-    """Export results to Google Sheets"""
-    try:
-        client = get_google_sheets_client()
-        if not client:
-            return False
-        
-        # Extract sheet ID from URL
-        sheet_id = sheet_url.split('/d/')[1].split('/')[0]
-        
-        # Open the spreadsheet
-        spreadsheet = client.open_by_key(sheet_id)
-        
-        # Create or get worksheet
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        worksheet_name = f"Scan_{timestamp}"
-        
-        try:
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=len(df)+1, cols=len(df.columns))
-        except:
-            worksheet = spreadsheet.worksheet(worksheet_name)
-        
-        # Clear existing data
-        worksheet.clear()
-        
-        # Write headers and data
-        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
-        
-        # Format header row
-        worksheet.format('A1:E1', {
-            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.8},
-            "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}
-        })
-        
-        return True
-    except Exception as e:
-        st.error(f"Error exporting to Google Sheets: {str(e)}")
-        return False
+def results_to_csv(results):
+    """Convert results to CSV string"""
+    output = io.StringIO()
+    if results:
+        writer = csv.DictWriter(output, fieldnames=results[0].keys())
+        writer.writeheader()
+        writer.writerows(results)
+    return output.getvalue()
 
 
 def is_internal_url(url, base_domain):
@@ -544,17 +489,15 @@ if st.button("🚀 Start Image Health Check", type="primary", disabled=not playw
         elapsed_time = time.time() - start_time
         
         if results:
-            df = pd.DataFrame(results)
-            
             # Display summary metrics
             st.markdown("---")
             st.subheader("📊 Scan Results")
             
             col1, col2, col3, col4 = st.columns(4)
             
-            total_images = len(df)
-            ok_images = len(df[df['Status Code'] == 200])
-            broken_images = len(df[df['Status Code'] != 200])
+            total_images = len(results)
+            ok_images = len([r for r in results if r['Status Code'] == 200])
+            broken_images = len([r for r in results if r['Status Code'] != 200])
             success_rate = (ok_images / total_images * 100) if total_images > 0 else 0
             
             col1.metric("Total Images", total_images)
@@ -564,30 +507,11 @@ if st.button("🚀 Start Image Health Check", type="primary", disabled=not playw
             
             st.info(f"⏱️ Scan completed in {elapsed_time:.1f} seconds")
             
-            # Filter options
-            st.markdown("---")
-            st.subheader("🔍 Filter Results")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                status_filter = st.multiselect(
-                    "Filter by Status",
-                    options=df['Status'].unique(),
-                    default=df['Status'].unique()
-                )
-            
-            with col2:
-                show_only_broken = st.checkbox("Show Only Broken Images", value=False)
-            
-            # Apply filters
-            filtered_df = df[df['Status'].isin(status_filter)]
-            if show_only_broken:
-                filtered_df = filtered_df[filtered_df['Status Code'] != 200]
-            
             # Display results table
+            st.markdown("---")
+            st.subheader("🔍 All Results")
             st.dataframe(
-                filtered_df,
+                results,
                 use_container_width=True,
                 height=400
             )
@@ -596,9 +520,9 @@ if st.button("🚀 Start Image Health Check", type="primary", disabled=not playw
             if broken_images > 0:
                 st.markdown("---")
                 st.subheader("❌ Broken Images Details")
-                broken_df = df[df['Status Code'] != 200]
+                broken_results = [r for r in results if r['Status Code'] != 200]
                 
-                for idx, row in broken_df.iterrows():
+                for row in broken_results:
                     with st.expander(f"❌ {row['Status']} - {row['Image URL'][:80]}..."):
                         st.write("**Page:**", row['Page URL'])
                         st.write("**Image URL:**", row['Image URL'])
@@ -610,26 +534,13 @@ if st.button("🚀 Start Image Health Check", type="primary", disabled=not playw
             st.markdown("---")
             st.subheader("💾 Export Results")
             
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download as CSV",
-                    data=csv,
-                    file_name=f"image_health_check_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-            
-            with col2:
-                if export_to_sheets:
-                    if st.button("📊 Export to Google Sheets"):
-                        sheet_url = "https://docs.google.com/spreadsheets/d/1k37PVPp_qKWPhn21AnstLj8GhkGng7ucf9zxMF_nOp0/edit"
-                        with st.spinner("Exporting to Google Sheets..."):
-                            if export_to_google_sheets(df, sheet_url):
-                                st.success("✅ Successfully exported to Google Sheets!")
-                            else:
-                                st.error("❌ Failed to export to Google Sheets")
+            csv_data = results_to_csv(results)
+            st.download_button(
+                label="📥 Download as CSV",
+                data=csv_data,
+                file_name=f"image_health_check_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
         else:
             st.warning("No images found during the scan.")
 
